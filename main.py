@@ -6,6 +6,10 @@ import re
 import html2text
 
 
+class UserCancelError(Exception):
+    pass
+
+
 class Point:
     """An object to contain normalised point data."""
 
@@ -151,13 +155,33 @@ def process_lines(data_lines):
     for chunk in chunks:
         try:
             new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
-            new_description = multi_strip(description_ex.findall(chunk)[0], description_ex.pattern.split(".*?"))
             new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
                                                            coordinates_ex.pattern.split(".*?")))
+            new_description = description_ex.findall(chunk)
+            if len(new_description) == 0:
+                new_description = ""
+            else:
+                new_description = multi_strip(new_description[0],
+                                              description_ex.pattern.split(".*?"))
             new_point = Point(new_name, new_lat, new_lon, new_description)
             points.append(new_point)
         except IndexError:
-            errors.append({"text": "Missing attribute in:\n" + chunk})
+            err = {"text": "Missing attribute in:\n" + chunk,
+                           "exception": traceback.format_exc()}
+            try:
+                err["name"] = new_name
+            except NameError:
+                pass
+            try:
+                err["description"] = str(new_description)
+            except NameError:
+                pass
+            try:
+                err["lon/lat"] = str(m(new_lon, new_lat))
+            except NameError:
+                pass
+
+            errors.append(err)
     return points, errors
 
 
@@ -167,11 +191,11 @@ RETURNS: File contents as string."""
     if file_name is None:
         file_name = easygui.fileopenbox(default="*.KML", filetypes=("*.KML",))
     if file_name is None:
-        return None
+        raise UserCancelError
 
     with open(file_name) as fh:
         data_lines = fh.read()  # fh.readlines()
-    return data_lines
+    return data_lines, file_name
 
 
 def spot_path(text):
@@ -346,36 +370,52 @@ Writes the points data to the CSV file."""
 
 
 def main():
-    data_lines = load_data()
-    if data_lines is None:
+    try:
+        data_lines, input_path = load_data()
+    except UserCancelError:
         return None
     msg = "{} lines of data loaded with an approximate {} points.\nContinue?".format(data_lines.count("\n"),
                                                                                      data_lines.count("</Placemark>"))
     choice = easygui.buttonbox(msg, choices=["Yes", "No"])
     if choice == "No" or choice is None:
-        return None
+        raise UserCancelError
     points, errors = process_lines(data_lines)
     fields = get_fields([p.get_attributes() for p in points])
-    msg = "{} points found.".format(len(points))
-    msg += "\n\n{} errors.".format(len(errors))
-    msg += "\n\nFields Found:\n"
-    for f in fields:
-        msg += f + "\n"
+    output_path = input_path.rsplit(".", 1)[0] + ".csv"
+    done = False
+    while not done:
+        msg = "{} points found.".format(len(points))
+        msg += "\n\n{} errors.".format(len(errors))
+        msg += "\n\nFields Found:\n"
+        for f in fields:
+            msg += f + "\n"
+        msg += "\nOutput Path:\n" + output_path
 
-    while choice is not None:
-        choices = ["View Data", "Export"]
+        choices = ["View Data", "Export", "Change Output\nLocation"]
         if len(errors) > 0:
-            choices.insert(1, "View Errors")
+            choices.append("View Errors")
         choice = easygui.buttonbox(msg, choices=choices)
 
-        if choice == "View Data":
+        if choice == choices[0]:
             pass
-            # data_explorer(dicts)
+            # data_explorer(points)
+        elif choice == choices[1]:
+            export_points(points, output_path, fields=fields)
+            easygui.msgbox("Done!\n\nThe program will now close.")
+            done = True
+        elif choice == choices[2]:
+            new_path = easygui.filesavebox(default=output_path, filetypes=["*.csv"])
+            if new_path is not None:
+                output_path = new_path
         elif choice == "View Errors":
             error_explorer(errors)
-        elif choice is "Export":
-            export_points(points, fields=fields)
-            easygui.msgbox("Done!\n\nThe program will now close.")
-            choice = None
         else:
-            pass
+            raise UserCancelError
+
+if __name__ == "__main__":
+    run = True
+    while run:
+        try:
+            main()
+        except UserCancelError:
+            run = False
