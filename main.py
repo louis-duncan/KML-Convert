@@ -143,8 +143,7 @@ class Converter:
         self._output_path = os.path.join(path, "output", str(filename.rsplit(".", 1)[0]) + ".csv")
 
     def load_data(self):
-        with open(self._input_path) as fh:
-            self._data_lines = fh.read().strip()
+        self._data_lines, fn = load_data(self._input_path)
 
     def convert(self):
         self._points, self._errors = process_lines(self._data_lines)
@@ -326,7 +325,7 @@ def process_lines(data_lines):
             except NameError:
                 pass
             try:
-                err["lon/lat"] = str(m(new_lon, new_lat))
+                err["lon/lat"] = str((new_lon, new_lat))
             except NameError:
                 pass
 
@@ -342,7 +341,7 @@ RETURNS: File contents as string."""
     if file_name is None:
         raise UserCancelError
 
-    with open(file_name) as fh:
+    with open(file_name, errors="surrogateescape") as fh:
         data_lines = fh.read()  # fh.readlines()
     return data_lines, file_name
 
@@ -505,6 +504,11 @@ Writes the points data to the CSV file."""
     if file_name is None:
         return None
 
+    # Ensure the dir exists.
+    path = os.path.dirname(file_name)
+    if not os.path.exists(path):
+        os.mkdir(path)
+
     if fields is None:
         fields = get_fields([p.get_attributes() for p in points])
 
@@ -512,7 +516,7 @@ Writes the points data to the CSV file."""
 
     rows = [headings] + [format_row(p, headings) for p in points]
 
-    fh = open(file_name, "w")
+    fh = open(file_name, "w", errors="surrogateescape")
     writer = csv.writer(fh, lineterminator='\n')
     writer.writerows(rows)
     fh.close()
@@ -602,6 +606,16 @@ Continue?""".format(len(converters),
                 data_explorer(converters)
             except UserCancelError:
                 pass
+        if choice == choices[1]:
+            text = ""
+            for c in converters:
+                try:
+                    c.export()
+                    text += "Successfully exported {}\n\n".format(c.get_input_path())
+                except Exception as err:
+                    text += "Error while exporting {}: {}\n\n".format(c.get_input_path(), err)
+            easygui.msgbox(text, "Export Complete")
+            done = True
         else:
             raise UserCancelError
 
