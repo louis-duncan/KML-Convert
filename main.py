@@ -1,4 +1,6 @@
 import csv
+import os
+
 import coord
 import traceback
 import easygui
@@ -99,6 +101,153 @@ If not, returns empty string."""
 
         self._text, self._attributes = get_attributes(self._text)
 
+    def one_line(self, width=100):
+        text = self._name + ": " + self._text.replace("\n", " ")
+        if len(text) > width:
+            text = text[: width - 3] + "..."
+        return text
+
+    def easy_view(self):
+        names = ["Name:",
+                 "Location:",
+                 "Text:",]
+        values = [self._name,
+                  coord.coord_to_nesw(self._longitude,
+                                      self._latitude),
+                  self._text,]
+        for a in self._attributes:
+            names.append(a.capitalize() + ":")
+            values.append(self._attributes[a])
+
+        text = ""
+        for i in range(len(names)):
+            text += names[i].ljust(max([len(n) for n in names]) + 1) + "\n"
+            text += values[i] + "\n\n"
+
+        easygui.msgbox(text, self._name)
+
+
+class Converter:
+    def __init__(self, input_path):
+        self._input_path = input_path
+        self._output_path = ""
+        self._data_lines = ""
+        self._points = []
+        self._errors = []
+
+        self.decide_output_path()
+        self.load_data()
+
+    def decide_output_path(self):
+        path, filename = os.path.split(self._input_path)
+        self._output_path = os.path.join(path, "output", str(filename.rsplit(".", 1)[0]) + ".csv")
+
+    def load_data(self):
+        with open(self._input_path) as fh:
+            self._data_lines = fh.read().strip()
+
+    def convert(self):
+        self._points, self._errors = process_lines(self._data_lines)
+
+    def get_errors(self):
+        return self._errors
+
+    def get_number_of_lines(self):
+        return self._data_lines.count("\n") + 1
+
+    def get_points_estimate(self):
+        return self._data_lines.count("<Placemark>")
+
+    def get_number_of_points(self):
+        return len(self._points)
+
+    def get_fields(self):
+        """Take a list of dicts.
+        RETURNS: A list containing all the unique/distinct keys used in the dicts given."""
+        fields = []
+        for p in self._points:
+            d = p.get_attributes()
+            if d is None:
+                pass
+            else:
+                for f in d:
+                    if f in fields:
+                        pass
+                    else:
+                        fields.append(f)
+        return sorted(fields)
+
+    def get_pre_info(self):
+        text = """{} lines loaded from:
+{}
+{} points expected.""".format(self.get_number_of_lines(),
+                              self._input_path,
+                              self.get_points_estimate())
+        return text
+
+    def get_post_info(self):
+        formatted_fields = ""
+        for f in self.get_fields():
+            formatted_fields += f + "\n"
+        formatted_fields = formatted_fields.strip()
+        text = """Input File:
+{}
+
+Output File:
+{}
+
+{} points found with {} errors.
+
+Fields:
+{}""".format(self._input_path, self._output_path, len(self._points), len(self._errors), formatted_fields)
+        return text
+
+    def export(self):
+        export_points(self._points, self._output_path)
+
+    def get_input_path(self):
+        return self._input_path
+
+    def explore(self):
+        formatted_fields = ""
+        for f in self.get_fields():
+            formatted_fields += "- " + f + "\n"
+        formatted_fields = formatted_fields.strip()
+        choices = ["View Points",
+                   "View Errors",
+                   "Change Output\nLocation",
+                   "Back"]
+        while True:
+            text = """Input File:
+{}
+Output File:
+{}
+
+Points: {}
+Errors: {}
+Fields:
+{}""".format(self._input_path,
+             self._output_path,
+             len(self._points),
+             len(self._errors),
+             formatted_fields)
+            choice = easygui.buttonbox(text, "Data Explorer", choices)
+            if choice == choices[0]:
+                point_choices = [p.one_line() for p in self._points]
+                point_choice = easygui.choicebox("Choose a point to view:", "Points", point_choices)
+                if point_choice is not None:
+                    self._points[point_choices.index(point_choice)].easy_view()
+                else:
+                    pass
+            elif choice == choices[1]:
+                error_explorer(self._errors)
+            elif choice == choices[2]:
+                new_path = easygui.filesavebox("Choose Save Location", default=self._output_path, filetypes=["*.csv"])
+                if new_path is None:
+                    pass
+            else:
+                raise UserCancelError
+
 
 def explicit_strip(text: str, target: str):
     """Takes a string, and removes the target exactly from the beginning and end.
@@ -167,7 +316,7 @@ def process_lines(data_lines):
             points.append(new_point)
         except IndexError:
             err = {"text": "Missing attribute in:\n" + chunk,
-                           "exception": traceback.format_exc()}
+                   "exception": traceback.format_exc()}
             try:
                 err["name"] = new_name
             except NameError:
@@ -369,7 +518,7 @@ Writes the points data to the CSV file."""
     fh.close()
 
 
-def main():
+def single_file():
     try:
         data_lines, input_path = load_data()
     except UserCancelError:
@@ -412,10 +561,56 @@ def main():
         else:
             raise UserCancelError
 
+
+def data_explorer(converters):
+    choices = [c.get_input_path() for c in converters]
+    while True:
+        choice = easygui.choicebox("Choose a file to review:", "Data Explorer", choices)
+        if choice is None:
+            raise UserCancelError
+        converters[choices.index(choice)].explore()
+
+
+def multi_file():
+    file_paths = easygui.fileopenbox(default="*.kml", multiple=True)
+    if file_paths is None:
+        raise UserCancelError
+
+    converters = [Converter(path) for path in file_paths]
+    pre_msg = """{} files loaded with a total of {} lines.
+{} points expected.
+
+Continue?""".format(len(converters),
+                    sum([c.get_number_of_lines() for c in converters]),
+                    sum([c.get_points_estimate() for c in converters]))
+
+    choice = easygui.buttonbox(pre_msg, "Multi File Convert", ["Yes", "No"])
+    if choice is None or choice == "No":
+        raise UserCancelError
+
+    for c in range(len(converters)):
+        converters[c].convert()
+
+    post_msg = "{} points found with {} errors.".format(sum([c.get_number_of_points() for c in converters]),
+                                                        sum([len(c.get_errors()) for c in converters]))
+    choices = ["View Data\nby File", "Export", "Cancel"]
+    done = False
+    while not done:
+        choice = easygui.buttonbox(post_msg, "Multi File Convert", choices)
+        if choice == choices[0]:
+            try:
+                data_explorer(converters)
+            except UserCancelError:
+                pass
+        else:
+            raise UserCancelError
+
+
 if __name__ == "__main__":
-    run = True
-    while run:
-        try:
-            main()
-        except UserCancelError:
-            run = False
+    # run = True
+    # while run:
+    #    try:
+    #        main()
+    #    except UserCancelError:
+    #        run = False
+    pass
