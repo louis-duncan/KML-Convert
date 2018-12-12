@@ -1,5 +1,6 @@
 import csv
 import os
+import subprocess
 
 import coord
 import traceback
@@ -71,18 +72,11 @@ If not, returns empty string."""
         if self._text.startswith("<![CDATA[") and self._text.endswith("]]>"):
             self._text = multi_replace(self._text,
                                        ["<![CDATA[",
-                                        "]]>",
-                                        "<B>",
-                                        "</B>",
-                                        "<I>",
-                                        "</I>",
-                                        "<P>",
-                                        "</P>,"
-                                        "<H>",
-                                        "</H"],
+                                        "]]>"],
                                        "")
             self._text = self._text.replace("\n", "<br>")
             handler = html2text.HTML2Text()
+            handler.ignore_emphasis = True
             handler.body_width = 1000000
             self._text = handler.handle(self._text).strip()
             new_string = ""
@@ -110,11 +104,13 @@ If not, returns empty string."""
     def easy_view(self):
         names = ["Name:",
                  "Location:",
-                 "Text:",]
+                 "Text:",
+                 ]
         values = [self._name,
                   coord.coord_to_nesw(self._longitude,
                                       self._latitude),
-                  self._text,]
+                  self._text,
+                  ]
         for a in self._attributes:
             names.append(a.capitalize() + ":")
             values.append(self._attributes[a])
@@ -135,6 +131,8 @@ class Converter:
         self._points = []
         self._errors = []
 
+        self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>"]
+
         self.decide_output_path()
         self.load_data()
 
@@ -146,7 +144,7 @@ class Converter:
         self._data_lines, fn = load_data(self._input_path)
 
     def convert(self):
-        self._points, self._errors = process_lines(self._data_lines)
+        self._points, self._errors = process_lines(self._data_lines, self._placemark_expressions)
 
     def get_errors(self):
         return self._errors
@@ -155,7 +153,7 @@ class Converter:
         return self._data_lines.count("\n") + 1
 
     def get_points_estimate(self):
-        return self._data_lines.count("<Placemark>")
+        return sum([len(re.compile(e, re.DOTALL).findall(self._data_lines)) for e in self._placemark_expressions])
 
     def get_number_of_points(self):
         return len(self._points)
@@ -245,7 +243,40 @@ Fields:
                 if new_path is None:
                     pass
             else:
-                raise UserCancelError
+                raise UserCancelError()
+
+    def edit_parameters(self):
+        done = False
+        while not done:
+            para_choice = easygui.choicebox("Choose Parameter to Edit:",
+                                            "Parameter Edit",
+                                            choices=["Show File Location..."] + self._placemark_expressions + ["Add New Expression..."])
+            if para_choice == "Show File Location...":
+                subprocess.Popen(r'explorer /select,"{}"'.format(self.get_input_path()))
+            elif para_choice in self._placemark_expressions:
+                pos = self._placemark_expressions.index(para_choice)
+                new = easygui.enterbox("Edit expression, leave blank to remove:",
+                                       default=para_choice)
+                if new is None:
+                    pass
+                else:
+                    if new == "":
+                        self._placemark_expressions.remove(para_choice)
+                    else:
+                        self._placemark_expressions[pos] = new
+            elif para_choice == "Add New Expression...":
+                default = "<ABC>.*?</ABC>"
+                new = easygui.enterbox("Type regular expression to find points:",
+                                       default=default)
+                if new is None:
+                    pass
+                else:
+                    if new in self._placemark_expressions or new == default:
+                        easygui.msgbox("Expression is duplicate or the same as the template.\nNot added.")
+                    else:
+                        self._placemark_expressions.append(new)
+            else:
+                done = True
 
 
 def explicit_strip(text: str, target: str):
@@ -292,15 +323,21 @@ RETURNS: Stripped string"""
     return text
 
 
-def process_lines(data_lines):
-    place_ex = re.compile("<Placemark>.*?</Placemark>", re.DOTALL)
+def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
+    place_exes = [re.compile(e, re.DOTALL) for e in expressions]
     name_ex = re.compile("<name>.*?</name>", re.DOTALL)
     description_ex = re.compile("<description>.*?</description>", re.DOTALL)
     coordinates_ex = re.compile("<coordinates>.*?</coordinates>", re.DOTALL)
-    chunks = place_ex.findall(data_lines)
+    chunks = []
+    for ex in place_exes:
+        chunks += ex.findall(data_lines)
     points = []
     errors = []
+    c = 0
     for chunk in chunks:
+        c += 1
+        if (c - 1) % 1000 == 0:
+            print("Processed {} points of {}.".format(c, len(chunks)))
         try:
             new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
             new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
@@ -339,7 +376,7 @@ RETURNS: File contents as string."""
     if file_name is None:
         file_name = easygui.fileopenbox(default="*.KML", filetypes=("*.KML",))
     if file_name is None:
-        raise UserCancelError
+        raise UserCancelError()
 
     with open(file_name, errors="surrogateescape") as fh:
         data_lines = fh.read()  # fh.readlines()
@@ -350,7 +387,7 @@ def spot_path(text):
     """Takes a string and looks for a file path with prefix 'src="'.
 RETURNS: The path if a path is found, else: returns None"""
     test1 = re.search('src=".*">', text)
-    test2 = re.search('!\[\]\(.*\)', text)
+    test2 = re.search(r'!\[\]\(.*\)', text)
     if test1 is not None:
         start_pos, end_pos = test1.span()
         path = multi_strip(text[start_pos: end_pos], ['src="', ' ">'])
@@ -396,7 +433,11 @@ def get_attributes(text,
                               "status dec 1944",
                               "current use",
                               "remarks",
+                              "description",
+                              "location",
+                              "condition",
                               ),
+                   separators=(":", "=")
                    ):
     """Takes a long string, and searches for lines starting with given key words.
 Default key words are as above, but a custom list of key words can be defined.
@@ -408,36 +449,41 @@ and a dict containing values against keys which are the key word by which they w
 
     lines, paths = find_paths(lines)
 
-    new_lines = []
+    new_text = ""
 
     for line in lines:
-        key_word_match = False
-        for key_word in key_words:
-            if line.lower().startswith(key_word.lower()):
-                key_word_match = True
-                key_valid = False
-                n = 0
-                new_key_word = key_word.lower()
-                while not key_valid:
-                    if new_key_word in attributes.keys():
-                        n += 1
-                        new_key_word = key_word.lower() + " " + str(n)
-                    else:
-                        key_valid = True
-                attributes[new_key_word] = multi_strip(line[len(key_word):], [":", " ", "\n", "\t"])
+        split = False
+        found = False
+        parts = []
+        for s in separators:
+            if not split:
+                parts = line.split(s, 1)
+                if len(parts) > 1:
+                    split = True
+                else:
+                    pass
             else:
                 pass
-        if not key_word_match:
-            new_lines.append(line)
 
-    for i, path in enumerate(paths):
-        attributes["path " + str(i + 1)] = path
+        if split:
+            found_key = multi_strip(parts[0], [" ", "\t", "-", ":", "#", "\\", "="]).lower()
+            found_data = multi_strip(parts[1], [" ", "\t", "\n", "-", ":", "#", "\\", "="])
+            if found_key in key_words:
+                attributes[found_key] = found_data
+                found = True
+            else:
+                pass
+        else:
+            pass
 
-    new_text = ""
-    for line in new_lines:
-        new_text += line + "\n"
-    new_text = new_text.strip()
-
+        if split and found:
+            pass
+        else:
+            new_line = multi_strip(parts[1], [" ", "\t", "\n", ":", "#"])
+            if new_line == "":
+                pass
+            else:
+                new_text += new_line + "\n"
     return new_text, attributes
 
 
@@ -531,7 +577,7 @@ def single_file():
                                                                                      data_lines.count("</Placemark>"))
     choice = easygui.buttonbox(msg, choices=["Yes", "No"])
     if choice == "No" or choice is None:
-        raise UserCancelError
+        raise UserCancelError()
     points, errors = process_lines(data_lines)
     fields = get_fields([p.get_attributes() for p in points])
     output_path = input_path.rsplit(".", 1)[0] + ".csv"
@@ -563,7 +609,7 @@ def single_file():
         elif choice == "View Errors":
             error_explorer(errors)
         else:
-            raise UserCancelError
+            raise UserCancelError()
 
 
 def data_explorer(converters):
@@ -571,26 +617,35 @@ def data_explorer(converters):
     while True:
         choice = easygui.choicebox("Choose a file to review:", "Data Explorer", choices)
         if choice is None:
-            raise UserCancelError
+            raise UserCancelError()
         converters[choices.index(choice)].explore()
 
 
 def multi_file():
     file_paths = easygui.fileopenbox(default="*.kml", multiple=True)
     if file_paths is None:
-        raise UserCancelError
+        raise UserCancelError()
 
     converters = [Converter(path) for path in file_paths]
-    pre_msg = """{} files loaded with a total of {} lines.
-{} points expected.
-
-Continue?""".format(len(converters),
-                    sum([c.get_number_of_lines() for c in converters]),
-                    sum([c.get_points_estimate() for c in converters]))
-
-    choice = easygui.buttonbox(pre_msg, "Multi File Convert", ["Yes", "No"])
-    if choice is None or choice == "No":
-        raise UserCancelError
+    started = False
+    choices = ["Continue", "Edit\nParameters"]
+    while not started:
+        pre_msg = ""
+        for c in converters:
+            pre_msg += "{}:\nExpecting {} points from {} lines.\n\n".format(os.path.basename(c.get_input_path()),
+                                                                            c.get_points_estimate(),
+                                                                            c.get_number_of_lines())
+        choice = easygui.buttonbox(pre_msg, "Multi File Convert", choices)
+        if choice == choices[0]:
+            started = True
+        elif choice == choices[1]:
+            file_choices = [os.path.basename(c.get_input_path()) for c in converters]
+            file_choice = easygui.choicebox("Select file:",
+                                            "Parameter Edit",
+                                            choices=file_choices)
+            converters[file_choices.index(file_choice)].edit_parameters()
+        else:
+            raise UserCancelError()
 
     for c in range(len(converters)):
         converters[c].convert()
@@ -606,10 +661,11 @@ Continue?""".format(len(converters),
                 data_explorer(converters)
             except UserCancelError:
                 pass
-        if choice == choices[1]:
+        elif choice == choices[1]:
             text = ""
             for c in converters:
                 try:
+                    print("Exporting points from {}.".format(os.path.basename(c.get_input_path())))
                     c.export()
                     text += "Successfully exported {}\n\n".format(c.get_input_path())
                 except Exception as err:
@@ -617,7 +673,7 @@ Continue?""".format(len(converters),
             easygui.msgbox(text, "Export Complete")
             done = True
         else:
-            raise UserCancelError
+            raise UserCancelError()
 
 
 if __name__ == "__main__":
