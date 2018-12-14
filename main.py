@@ -22,6 +22,7 @@ class Point:
                  longitude=0.0,
                  text="",
                  attributes=None,
+                 style=None,
                  icon_type=None,
                  ):
         self._name = name
@@ -29,6 +30,7 @@ class Point:
         self._latitude = latitude
         self._text = text
         self._attributes = attributes
+        self._style = style
         self._icon_type = icon_type
         self.convert_text()
 
@@ -122,6 +124,12 @@ If not, returns empty string."""
 
         easygui.msgbox(text, self._name)
 
+    def set_icon(self, url):
+        self._icon_type = url
+
+    def get_style(self):
+        return self._style
+
 
 class Converter:
     def __init__(self, input_path):
@@ -130,6 +138,7 @@ class Converter:
         self._data_lines = ""
         self._points = []
         self._errors = []
+        self._styles = []
 
         self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>"]
 
@@ -144,7 +153,9 @@ class Converter:
         self._data_lines, fn = load_data(self._input_path)
 
     def convert(self):
+        self.get_styles()
         self._points, self._errors = process_lines(self._data_lines, self._placemark_expressions)
+        self.give_icons()
 
     def get_errors(self):
         return self._errors
@@ -249,7 +260,7 @@ Fields:
         done = False
         while not done:
             para_choice = easygui.choicebox("Choose Parameter to Edit:",
-                                            "Parameter Edit",
+                                            "Parameter Edit - {}".format(os.path.basename(self._input_path)),
                                             choices=["Show File Location..."] + self._placemark_expressions + ["Add New Expression..."])
             if para_choice == "Show File Location...":
                 subprocess.Popen(r'explorer /select,"{}"'.format(self.get_input_path()))
@@ -277,6 +288,70 @@ Fields:
                         self._placemark_expressions.append(new)
             else:
                 done = True
+
+    def get_styles(self):
+        styles_ex = re.compile('<Style id=".*?">.*?</Style>', re.DOTALL)
+        maps_ex = re.compile('<StyleMap id=".*?">.*?</StyleMap>', re.DOTALL)
+        style_chunks = styles_ex.findall(self._data_lines)
+        map_chunks = maps_ex.findall(self._data_lines)
+
+        self._styles = []
+
+        for c in style_chunks:
+            self._styles.append(Style(c))
+
+        for c in map_chunks:
+            map_urls = re.findall("<styleUrl>.*?<styleUrl>", c)
+            for u in map_urls:
+                id_ex = re.compile('<StyleMap id=".*?">', re.DOTALL)
+                pairs_ex = re.compile('<Pair>.*?</Pair>, re.DOTALL')
+                url_ex = re.compile('<styleUrl>.*?</styleUrl>', re.DOTALL)
+                map_id = multi_strip(id_ex.findall(c)[0],
+                                     ['<StyleMap id="',
+                                      '">']
+                                     )
+                style_ids = [url_ex.findall(p)[0] for p in pairs_ex.findall(u)]
+                for si in style_ids:
+                    self._styles.append(Style(None,
+                                              map_id,
+                                              self.get_style_icon(si)))
+
+    def get_style_icon(self, style_id):
+        for s in self._styles:
+            if s.get_id() == style_id:
+                return s.get_icon()
+
+    def give_icons(self):
+        for p in range(len(self._points)):
+            self._points[p].set_icon(self.get_style_icon(self._points[p].get_style()))
+
+
+class Style:
+    def __init__(self, text=None, style_id="", icon=""):
+        if text is not None:
+            id_ex = re.compile('<Style id=".*?">')
+            icon_ex = re.compile('<Icon>.*?</Icon>', re.DOTALL)
+            href_ex = re.compile('<href>.*?</href>', re.DOTALL)
+            self._id = multi_strip(id_ex.findall(text)[0],
+                                   ['<Style id="',
+                                    '">']
+                                   )
+            self._icon = multi_strip(href_ex.findall(icon_ex.findall(text)[0])[0],
+                                     ["<href>",
+                                      "</href>",
+                                      ],
+                                     )
+        elif id != "" and icon != "":
+            self._id = style_id
+            self._icon = icon
+        else:
+            raise AttributeError
+
+    def get_id(self):
+        return self._id
+
+    def get_icon(self):
+        return self._icon
 
 
 def explicit_strip(text: str, target: str):
@@ -328,6 +403,7 @@ def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
     name_ex = re.compile("<name>.*?</name>", re.DOTALL)
     description_ex = re.compile("<description>.*?</description>", re.DOTALL)
     coordinates_ex = re.compile("<coordinates>.*?</coordinates>", re.DOTALL)
+    style_ex = re.compile("<styleUrl>.*?</styleUrl>")
     chunks = []
     for ex in place_exes:
         chunks += ex.findall(data_lines)
@@ -335,9 +411,8 @@ def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
     errors = []
     c = 0
     for chunk in chunks:
-        c += 1
         if (c - 1) % 1000 == 0:
-            print("Processed {} points of {}.".format(c, len(chunks)))
+            print("Processed {} points of {}.".format(c - 1, len(chunks)))
         try:
             new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
             new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
@@ -348,10 +423,17 @@ def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
             else:
                 new_description = multi_strip(new_description[0],
                                               description_ex.pattern.split(".*?"))
-            new_point = Point(new_name, new_lat, new_lon, new_description)
+            new_style = style_ex.findall(chunk)
+            if len(new_style) == 0:
+                new_style = None
+            else:
+                new_style = multi_strip(new_style[0],
+                                        style_ex.pattern.split(".*?"))
+            new_point = Point(new_name, new_lat, new_lon, new_description, style=new_style)
             points.append(new_point)
         except IndexError:
             err = {"text": "Missing attribute in:\n" + chunk,
+                   "chunk number": c,
                    "exception": traceback.format_exc()}
             try:
                 err["name"] = new_name
@@ -367,6 +449,7 @@ def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
                 pass
 
             errors.append(err)
+        c += 1
     return points, errors
 
 
@@ -420,6 +503,16 @@ RETURNS: The text minus any lines in which paths were found, and a list of paths
     return new_lines, paths
 
 
+def insert_attribute(attributes, key, data):
+    n = 2
+    new_key = key
+    while new_key in attributes:
+        new_key = key + str(n)
+        n += 1
+    attributes[new_key] = data
+    return attributes
+
+
 def get_attributes(text,
                    key_words=("date",
                               "scale",
@@ -436,6 +529,18 @@ def get_attributes(text,
                               "description",
                               "location",
                               "condition",
+                              "long",
+                              "lat",
+                              "title",
+                              "county",
+                              "type",
+                              "ngr",
+                              "comments",
+                              "site",
+                              "date found",
+                              "date fell",
+                              "date made safe",
+                              "date from",
                               ),
                    separators=(":", "=")
                    ):
@@ -447,44 +552,38 @@ and a dict containing values against keys which are the key word by which they w
 
     lines = [l.strip() for l in text.split("\n")]
 
-    lines, paths = find_paths(lines)
-
     new_text = ""
 
     for line in lines:
-        split = False
         found = False
-        parts = []
+        found_key = ""
+        found_data = ""
         for s in separators:
-            if not split:
-                parts = line.split(s, 1)
-                if len(parts) > 1:
-                    split = True
-                else:
-                    pass
+            parts = line.split(s, 1)
+            if len(parts) > 1:
+                found_key = multi_strip(parts[0], [" ", "\t", "-", ":", "#", "\\", "="]).lower()
+                if found_key in key_words:
+                    found = True
+                    found_data = multi_strip(parts[1], [" ", "\t", "\n", "-", ":", "#", "\\", "="])
+                    break
             else:
                 pass
+        else:
+            pass
 
-        if split:
-            found_key = multi_strip(parts[0], [" ", "\t", "-", ":", "#", "\\", "="]).lower()
-            found_data = multi_strip(parts[1], [" ", "\t", "\n", "-", ":", "#", "\\", "="])
-            if found_key in key_words:
-                attributes[found_key] = found_data
+        if not found:
+            path = spot_path(line)
+            if path is not None:
                 found = True
-            else:
-                pass
-        else:
-            pass
+                found_key = "path"
+                found_data = path
 
-        if split and found:
-            pass
+        if found:
+            attributes = insert_attribute(attributes, found_key, found_data)
         else:
-            new_line = multi_strip(parts[1], [" ", "\t", "\n", ":", "#"])
-            if new_line == "":
-                pass
-            else:
-                new_text += new_line + "\n"
-    return new_text, attributes
+            new_text += line + "\n"
+
+    return new_text.strip(), attributes
 
 
 def error_explorer(errors):
@@ -558,7 +657,11 @@ Writes the points data to the CSV file."""
     if fields is None:
         fields = get_fields([p.get_attributes() for p in points])
 
-    headings = ["x", "y", "id", "text"] + fields
+    headings = ["x", "y", "id", "text"]
+    if "icon" in fields:
+        headings.append("icon")
+        fields.remove("icon")
+    headings = headings + fields
 
     rows = [headings] + [format_row(p, headings) for p in points]
 
