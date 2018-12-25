@@ -374,7 +374,7 @@ Fields:
                 points.append(new_point)
             except IndexError:
                 err = {"text": "Missing attribute in:\n" + chunk,
-                       "chunk number": c,
+                       "chunk number": self._converted_count,
                        "exception": traceback.format_exc()}
                 errors.append(err)
             self._converted_count += 1
@@ -782,30 +782,40 @@ def data_explorer(converters):
         converters[choices.index(choice)].explore()
 
 
+def format_time(seconds):
+    mins = seconds // 60
+    secs = seconds % 60
+    return str(round(mins)).zfill(2) + ":" + str(round(secs)).zfill(2)
+
+
 def threaded_converting(converters):
+    no_of_threads = threading.active_count()
     converter_threads = [threading.Thread(target=c.convert) for c in converters]
     c: Converter
     t: Thread
+    start_time = time.time()
+    time_passed = 0
     for t in converter_threads:
         t.start()
     longest_path = max([len(c.get_input_path()) for c in converters])
     points_estimates = [c.get_points_estimate() for c in converters]
-    while False in [c.is_converted() for c in converters]:
-        clear_screen()
-        print("Path".ljust(longest_path + 4) + "Complete")
-        print("-" * (longest_path + 3), "--------")
+    while (False in [c.is_converted() for c in converters]) and no_of_threads != threading.active_count():
+        time_passed = round(time.time() - start_time)
+        text = "Time Passed: " + format_time(time_passed) + "\n"
+        text += "Path".ljust(longest_path + 4) + "Progress\n"
+        text += ("-" * longest_path) + "    --------\n"
         for i, c in enumerate(converters):
-            if c.is_converted():
-                print(c.get_input_path().ljust(longest_path + 3), "True")
-            else:
-                print(c.get_input_path().ljust(longest_path + 3), c.get_converted_count(), "of", points_estimates[i])
-        time.sleep(1)
-    return converters
+            text += c.get_input_path().ljust(longest_path + 4) + str(c.get_converted_count()) + " of " + str(points_estimates[i])
+            text += "\n"
+        clear_screen()
+        print(text)
+        time.sleep(5)
+    return converters, time_passed
 
 
 def clear_screen():
-    #os.system("cls")
-    print("---------------------------------------------------------------------------------------------------")
+    os.system("cls")
+    # print("---------------------------------------------------------------------------------------------------")
 
 
 def multi_file():
@@ -834,11 +844,16 @@ def multi_file():
         else:
             raise UserCancelError()
 
-    for c in range(len(converters)):
-        converters[c].convert()
+    converters, time_taken = threaded_converting(converters)
 
-    post_msg = "{} points found with {} errors.".format(sum([c.get_number_of_points() for c in converters]),
-                                                        sum([len(c.get_errors()) for c in converters]))
+    #start_time = time.time()
+    #for c in converters:
+    #    c.convert()
+    #time_taken = time.time() - start_time
+
+    post_msg = "{} points found with {} errors.\n\nTime Taken: {}".format(sum([c.get_number_of_points() for c in converters]),
+                                                                          sum([len(c.get_errors()) for c in converters]),
+                                                                          format_time(time_taken))
     choices = ["View Data\nby File", "Export", "Cancel"]
     done = False
     while not done:
@@ -870,4 +885,5 @@ if __name__ == "__main__":
     #        main()
     #    except UserCancelError:
     #        run = False
+    multi_file()
     pass
