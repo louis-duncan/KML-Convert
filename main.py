@@ -23,7 +23,6 @@ class Point:
                  text="",
                  attributes=None,
                  style=None,
-                 icon_type=None,
                  ):
         self._name = name
         self._longitude = longitude
@@ -31,7 +30,6 @@ class Point:
         self._text = text
         self._attributes = attributes
         self._style = style
-        self._icon_type = icon_type
         self.convert_text()
 
     def get_name(self):
@@ -60,9 +58,6 @@ If not, returns empty string."""
             return self._attributes[key]
         except KeyError:
             return nul_resp
-
-    def get_icon_type(self):
-        return self._icon_type
 
     def set_text(self, text):
         self._text = text
@@ -124,9 +119,6 @@ If not, returns empty string."""
 
         easygui.msgbox(text, self._name)
 
-    def set_icon(self, url):
-        self._icon_type = url
-
     def get_style(self):
         return self._style
 
@@ -139,6 +131,7 @@ class Converter:
         self._points = []
         self._errors = []
         self._styles = []
+        self._style_maps = []
 
         self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>"]
 
@@ -153,9 +146,8 @@ class Converter:
         self._data_lines, fn = load_data(self._input_path)
 
     def convert(self):
-        self.get_styles()
+        self.decode_styles()
         self._points, self._errors = process_lines(self._data_lines, self._placemark_expressions)
-        self.give_icons()
 
     def get_errors(self):
         return self._errors
@@ -261,7 +253,8 @@ Fields:
         while not done:
             para_choice = easygui.choicebox("Choose Parameter to Edit:",
                                             "Parameter Edit - {}".format(os.path.basename(self._input_path)),
-                                            choices=["Show File Location..."] + self._placemark_expressions + ["Add New Expression..."])
+                                            choices=["Show File Location..."] + self._placemark_expressions + [
+                                                "Add New Expression..."])
             if para_choice == "Show File Location...":
                 subprocess.Popen(r'explorer /select,"{}"'.format(self.get_input_path()))
             elif para_choice in self._placemark_expressions:
@@ -289,69 +282,130 @@ Fields:
             else:
                 done = True
 
-    def get_styles(self):
+    def decode_styles(self):
         styles_ex = re.compile('<Style id=".*?">.*?</Style>', re.DOTALL)
         maps_ex = re.compile('<StyleMap id=".*?">.*?</StyleMap>', re.DOTALL)
-        style_chunks = styles_ex.findall(self._data_lines)
-        map_chunks = maps_ex.findall(self._data_lines)
-
-        self._styles = []
-
-        for c in style_chunks:
-            self._styles.append(Style(c))
-
-        for c in map_chunks:
-            map_urls = re.findall("<styleUrl>.*?<styleUrl>", c)
-            for u in map_urls:
-                id_ex = re.compile('<StyleMap id=".*?">', re.DOTALL)
-                pairs_ex = re.compile('<Pair>.*?</Pair>, re.DOTALL')
-                url_ex = re.compile('<styleUrl>.*?</styleUrl>', re.DOTALL)
-                map_id = multi_strip(id_ex.findall(c)[0],
-                                     ['<StyleMap id="',
-                                      '">']
-                                     )
-                style_ids = [url_ex.findall(p)[0] for p in pairs_ex.findall(u)]
-                for si in style_ids:
-                    self._styles.append(Style(None,
-                                              map_id,
-                                              self.get_style_icon(si)))
+        self._styles = [Style(st) for st in styles_ex.findall(self._data_lines)]
+        self._style_maps = [StyleMap(mt) for mt in maps_ex.findall(self._data_lines)]
 
     def get_style_icon(self, style_id):
+        if style_id is None:
+            return None
+        else:
+            result = self.search_styles(style_id)
+
+            if result is None:
+                result = self.search_style_maps(style_id)
+
+            if type(result) == Style:
+                return result.get_icon()
+            elif type(result) == StyleMap:
+                mapped_style = result.get_style()
+                return self.search_styles(mapped_style).get_icon()
+            else:
+                return None
+
+    def search_styles(self, test):
+        result = None
         for s in self._styles:
-            if s.get_id() == style_id:
-                return s.get_icon()
+            if s.check_id(test.strip("#")):
+                result = s
+                break
+        return result
+
+    def search_style_maps(self, test):
+        result = None
+        for s in self._style_maps:
+            if s.check_id(test.strip("#")):
+                result = s
+                break
+        return result
 
     def give_icons(self):
-        for p in range(len(self._points)):
-            self._points[p].set_icon(self.get_style_icon(self._points[p].get_style()))
+        # Todo: Write
+        pass
 
 
 class Style:
-    def __init__(self, text=None, style_id="", icon=""):
-        if text is not None:
-            id_ex = re.compile('<Style id=".*?">')
-            icon_ex = re.compile('<Icon>.*?</Icon>', re.DOTALL)
-            href_ex = re.compile('<href>.*?</href>', re.DOTALL)
-            self._id = multi_strip(id_ex.findall(text)[0],
-                                   ['<Style id="',
-                                    '">']
-                                   )
-            self._icon = multi_strip(href_ex.findall(icon_ex.findall(text)[0])[0],
-                                     ["<href>",
-                                      "</href>",
-                                      ],
-                                     )
-        elif id != "" and icon != "":
-            self._id = style_id
-            self._icon = icon
-        else:
-            raise AttributeError
+    def __init__(self, text=None):
+        self._text = text
+        self._id = ""
+        self._icon = None
+        self.decode()
+
+    def decode(self):
+        id_ex = re.compile('<Style id=".*?">')
+        icon_ex = re.compile('<Icon>.*?</Icon>', re.DOTALL)
+        href_ex = re.compile('<href>.*?</href>', re.DOTALL)
+        self._id = multi_strip(id_ex.findall(self._text)[0],
+                               ['<Style id="',
+                                '">',
+                                "#"]
+                               )
+        self._icon = multi_strip(href_ex.findall(icon_ex.findall(self._text)[0])[0],
+                                 ["<href>",
+                                  "</href>",
+                                  ],
+                                 )
 
     def get_id(self):
         return self._id
 
     def get_icon(self):
         return self._icon
+
+    def check_id(self, test):
+        return self._id == test
+
+
+class StyleMap:
+    """Defines a mapping from a style id to several other based on context."""
+
+    def __init__(self, text):
+        self._id = ""
+        self._pairs = {}
+        self._text = text
+        self.decode()
+
+    def decode(self):
+        id_ex = re.compile('<StyleMap id=".*?">')
+        map_id = multi_strip(id_ex.findall(self._text)[0], ['<StyleMap id="', '">', "#"])
+        key_ex = re.compile('<key>.*?</key>', re.DOTALL)
+        url_ex = re.compile('<styleUrl>.*?</styleUrl>', re.DOTALL)
+        keys = [multi_strip(k, ["<key>", "</key>"]) for k in key_ex.findall(self._text)]
+        urls = [multi_strip(s, ["<styleUrl>", "</styleUrl>"]) for s in url_ex.findall(self._text)]
+        style_pairs = {}
+        for i in range(len(keys)):
+            style_pairs[keys[i]] = urls[i]
+        self._id = map_id
+        self._pairs = style_pairs
+
+    def get_id(self):
+        return self._id
+
+    def check_id(self, test):
+        return test == self._id
+
+    def check_style(self, test):
+        found = False
+        k = None
+        for k in self._pairs:
+            if self._pairs[k] == test:
+                found = True
+                break
+        if found:
+            return k
+        else:
+            return False
+
+    def get_style(self, key="normal"):
+        try:
+            return self._pairs[key]
+        except ValueError:
+            return
+
+    def get_style_pairs(self):
+        return self._pairs
 
 
 def explicit_strip(text: str, target: str):
