@@ -1,6 +1,9 @@
 import csv
 import os
 import subprocess
+import threading
+import time
+from threading import Thread
 
 import coord
 import traceback
@@ -132,11 +135,17 @@ class Converter:
         self._errors = []
         self._styles = []
         self._style_maps = []
+        self._has_icons = False
+        self._converted = False
+        self._converted_count = 0
 
         self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>"]
 
         self.decide_output_path()
         self.load_data()
+
+    def is_converted(self):
+        return self._converted
 
     def decide_output_path(self):
         path, filename = os.path.split(self._input_path)
@@ -147,7 +156,12 @@ class Converter:
 
     def convert(self):
         self.decode_styles()
-        self._points, self._errors = process_lines(self._data_lines, self._placemark_expressions)
+        self.process_lines(self._placemark_expressions)
+        self._has_icons = [self.get_style_icon(p.get_style()) for p in self.get_points()].count(None) == self.get_number_of_points()
+        self._converted = True
+
+    def get_points(self):
+        return self._points
 
     def get_errors(self):
         return self._errors
@@ -325,6 +339,51 @@ Fields:
         # Todo: Write
         pass
 
+    def process_lines(self, expressions=("<Placemark.*?>.*?</Placemark>",)):
+        place_exes = [re.compile(e, re.DOTALL) for e in expressions]
+        name_ex = re.compile("<name>.*?</name>", re.DOTALL)
+        description_ex = re.compile("<description>.*?</description>", re.DOTALL)
+        coordinates_ex = re.compile("<coordinates>.*?</coordinates>", re.DOTALL)
+        style_ex = re.compile("<styleUrl>.*?</styleUrl>")
+        chunks = []
+        for ex in place_exes:
+            chunks += ex.findall(self._data_lines)
+        points = []
+        errors = []
+        thread_name = threading.currentThread().getName()
+        for chunk in chunks:
+            if (self._converted_count - 1) % 1000 == 0 and thread_name == "MainThread":
+                print("Processed {} points of {}.".format(self._converted_count - 1, len(chunks)))
+            try:
+                new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
+                new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
+                                                               coordinates_ex.pattern.split(".*?")))
+                new_description = description_ex.findall(chunk)
+                if len(new_description) == 0:
+                    new_description = ""
+                else:
+                    new_description = multi_strip(new_description[0],
+                                                  description_ex.pattern.split(".*?"))
+                new_style = style_ex.findall(chunk)
+                if len(new_style) == 0:
+                    new_style = None
+                else:
+                    new_style = multi_strip(new_style[0],
+                                            style_ex.pattern.split(".*?"))
+                new_point = Point(new_name, new_lat, new_lon, new_description, style=new_style)
+                points.append(new_point)
+            except IndexError:
+                err = {"text": "Missing attribute in:\n" + chunk,
+                       "chunk number": c,
+                       "exception": traceback.format_exc()}
+                errors.append(err)
+            self._converted_count += 1
+        self._points = points
+        self._errors = errors
+
+    def get_converted_count(self):
+        return self._converted_count
+
 
 class Style:
     def __init__(self, text=None):
@@ -450,61 +509,6 @@ RETURNS: Stripped string"""
         if text == previous:
             change = False
     return text
-
-
-def process_lines(data_lines, expressions=("<Placemark.*?>.*?</Placemark>",)):
-    place_exes = [re.compile(e, re.DOTALL) for e in expressions]
-    name_ex = re.compile("<name>.*?</name>", re.DOTALL)
-    description_ex = re.compile("<description>.*?</description>", re.DOTALL)
-    coordinates_ex = re.compile("<coordinates>.*?</coordinates>", re.DOTALL)
-    style_ex = re.compile("<styleUrl>.*?</styleUrl>")
-    chunks = []
-    for ex in place_exes:
-        chunks += ex.findall(data_lines)
-    points = []
-    errors = []
-    c = 0
-    for chunk in chunks:
-        if (c - 1) % 1000 == 0:
-            print("Processed {} points of {}.".format(c - 1, len(chunks)))
-        try:
-            new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
-            new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
-                                                           coordinates_ex.pattern.split(".*?")))
-            new_description = description_ex.findall(chunk)
-            if len(new_description) == 0:
-                new_description = ""
-            else:
-                new_description = multi_strip(new_description[0],
-                                              description_ex.pattern.split(".*?"))
-            new_style = style_ex.findall(chunk)
-            if len(new_style) == 0:
-                new_style = None
-            else:
-                new_style = multi_strip(new_style[0],
-                                        style_ex.pattern.split(".*?"))
-            new_point = Point(new_name, new_lat, new_lon, new_description, style=new_style)
-            points.append(new_point)
-        except IndexError:
-            err = {"text": "Missing attribute in:\n" + chunk,
-                   "chunk number": c,
-                   "exception": traceback.format_exc()}
-            try:
-                err["name"] = new_name
-            except NameError:
-                pass
-            try:
-                err["description"] = str(new_description)
-            except NameError:
-                pass
-            try:
-                err["lon/lat"] = str((new_lon, new_lat))
-            except NameError:
-                pass
-
-            errors.append(err)
-        c += 1
-    return points, errors
 
 
 def load_data(file_name=None):
@@ -776,6 +780,32 @@ def data_explorer(converters):
         if choice is None:
             raise UserCancelError()
         converters[choices.index(choice)].explore()
+
+
+def threaded_converting(converters):
+    converter_threads = [threading.Thread(target=c.convert) for c in converters]
+    c: Converter
+    t: Thread
+    for t in converter_threads:
+        t.start()
+    longest_path = max([len(c.get_input_path()) for c in converters])
+    points_estimates = [c.get_points_estimate() for c in converters]
+    while False in [c.is_converted() for c in converters]:
+        clear_screen()
+        print("Path".ljust(longest_path + 4) + "Complete")
+        print("-" * (longest_path + 3), "--------")
+        for i, c in enumerate(converters):
+            if c.is_converted():
+                print(c.get_input_path().ljust(longest_path + 3), "True")
+            else:
+                print(c.get_input_path().ljust(longest_path + 3), c.get_converted_count(), "of", points_estimates[i])
+        time.sleep(1)
+    return converters
+
+
+def clear_screen():
+    #os.system("cls")
+    print("---------------------------------------------------------------------------------------------------")
 
 
 def multi_file():
