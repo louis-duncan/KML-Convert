@@ -15,6 +15,10 @@ class UserCancelError(Exception):
     pass
 
 
+class InvalidPointError(Exception):
+    pass
+
+
 class Point:
     """An object to contain normalised point data."""
 
@@ -129,7 +133,7 @@ class Converter:
     def __init__(self, input_path):
         self._input_path = input_path
         self._output_path = ""
-        self._icon_dir= ""
+        self._icon_dir = ""
         self._data_lines = ""
         self._points = []
         self._errors = []
@@ -413,14 +417,19 @@ Fields:
         chunks = []
         for ex in place_exes:
             chunks += ex.findall(self._data_lines)
-        points = []
-        errors = []
+        self._points = []
         thread_name = threading.currentThread().getName()
         for chunk in chunks:
             if (self._converted_count - 1) % 1000 == 0 and thread_name == "MainThread":
                 print("Processed {} points of {}.".format(self._converted_count - 1, len(chunks)))
             try:
-                new_name = multi_strip(name_ex.findall(chunk)[0], name_ex.pattern.split(".*?"))
+                if "<LineString>" in chunk and "</LineString>" in chunk or "<LinearRing>" in chunk and "</LinearRing>" in chunk:
+                    raise InvalidPointError
+                new_name = name_ex.findall(chunk)
+                if len(new_name) == 0:
+                    new_name = ""
+                else:
+                    new_name = multi_strip(new_name[0], name_ex.pattern.split(".*?"))
                 new_lon, new_lat = coord.normalise(multi_strip(coordinates_ex.findall(chunk)[0],
                                                                coordinates_ex.pattern.split(".*?")))
                 new_description = description_ex.findall(chunk)
@@ -436,15 +445,15 @@ Fields:
                     new_style = multi_strip(new_style[0],
                                             style_ex.pattern.split(".*?"))
                 new_point = Point(new_name, new_lat, new_lon, new_description, style=new_style)
-                points.append(new_point)
-            except IndexError:
-                err = {"text": "Missing attribute in:\n" + chunk,
-                       "chunk number": self._converted_count,
-                       "exception": traceback.format_exc()}
-                errors.append(err)
+                self._points.append(new_point)
+            except InvalidPointError:
+                pass
+            except Exception:
+                error_dict = {"text": chunk,
+                              "chunk number": self._converted_count,
+                              "exception": traceback.format_exc()}
+                self._errors.append(error_dict)
             self._converted_count += 1
-        self._points = points
-        self._errors = errors
 
     def get_converted_count(self):
         return self._converted_count
@@ -461,16 +470,20 @@ class Style:
         id_ex = re.compile('<Style id=".*?">')
         icon_ex = re.compile('<Icon>.*?</Icon>', re.DOTALL)
         href_ex = re.compile('<href>.*?</href>', re.DOTALL)
-        self._id = multi_strip(id_ex.findall(self._text)[0],
-                               ['<Style id="',
-                                '">',
-                                "#"]
-                               )
-        self._icon_path = multi_strip(href_ex.findall(icon_ex.findall(self._text)[0])[0],
-                                      ["<href>",
-                                  "</href>",
-                                  ],
-                                      )
+        try:
+            self._id = multi_strip(id_ex.findall(self._text)[0],
+                                   ['<Style id="',
+                                    '">',
+                                    "#"]
+                                   )
+
+            self._icon_path = multi_strip(href_ex.findall(icon_ex.findall(self._text)[0])[0],
+                                          ["<href>",
+                                           "</href>",
+                                           ],
+                                          )
+        except IndexError:
+            pass
 
     def get_id(self):
         return self._id
@@ -716,7 +729,7 @@ def error_explorer(errors):
     """Takes a list of error, and presents an easygui box to view them.
 Will take a list of dict which have at least the keys 'text', 'id', and 'error',
 other keys are displayed in the message box."""
-    rows = [str([i + " : " + e[i] for i in e]) for e in errors]
+    rows = [str([str(i) + " : " + str(e[i]) for i in e]) for e in errors]
     choice = True
     while choice is not None:
         choice = easygui.choicebox(choices=rows)
@@ -812,7 +825,7 @@ def single_file():
 
 
 def data_explorer(converters):
-    choices = [c.get_input_path() for c in converters]
+    choices = [str(len(c.get_errors())) + " - " + c.get_input_path() for c in converters]
     while True:
         choice = easygui.choicebox("Choose a file to review:", "Data Explorer", choices)
         if choice is None:
@@ -843,7 +856,8 @@ def threaded_converting(converters):
         text += "Path".ljust(longest_path + 4) + "Progress\n"
         text += ("-" * longest_path) + "    --------\n"
         for i, c in enumerate(converters):
-            text += c.get_input_path().ljust(longest_path + 4) + str(c.get_converted_count()) + " of " + str(points_estimates[i])
+            text += c.get_input_path().ljust(longest_path + 4) + str(c.get_converted_count()) + " of " + str(
+                points_estimates[i])
             text += "\n"
         clear_screen()
         print(text)
@@ -884,14 +898,15 @@ def multi_file():
 
     converters, time_taken = threaded_converting(converters)
 
-    #start_time = time.time()
-    #for c in converters:
+    # start_time = time.time()
+    # for c in converters:
     #    c.convert()
-    #time_taken = time.time() - start_time
+    # time_taken = time.time() - start_time
 
-    post_msg = "{} points found with {} errors.\n\nTime Taken: {}".format(sum([c.get_number_of_points() for c in converters]),
-                                                                          sum([len(c.get_errors()) for c in converters]),
-                                                                          format_time(time_taken))
+    post_msg = "{} points found with {} errors.\n\nTime Taken: {}".format(
+        sum([c.get_number_of_points() for c in converters]),
+        sum([len(c.get_errors()) for c in converters]),
+        format_time(time_taken))
     choices = ["View Data\nby File", "Export", "Cancel"]
     done = False
     while not done:
@@ -904,12 +919,28 @@ def multi_file():
         elif choice == choices[1]:
             text = ""
             for c in converters:
-                try:
-                    print("Exporting points from {}.".format(os.path.basename(c.get_input_path())))
-                    c.export()
-                    text += "Successfully exported {}\n\n".format(c.get_input_path())
-                except Exception as err:
-                    text += "Error while exporting {}: {}\n\n".format(c.get_input_path(), err)
+                go = True
+                if len(c.get_errors()) > 0:
+                    go = None
+                    while go is None:
+                        confirmation_text = "{} errors were found in {}.\n\nContinue with conversion of this file?".format(
+                            len(c.get_errors()),
+                            c.get_input_path())
+                        go = easygui.boolbox(confirmation_text,
+                                             "Continue?",
+                                             )
+                if go:
+                    try:
+                        print("Exporting points from {}.".format(os.path.basename(c.get_input_path())), end="")
+                        c.export()
+                        text += "Successfully exported {}\n\n".format(c.get_input_path())
+                        print(" - Done")
+                    except Exception as err:
+                        text += "Error while exporting {}: {}\n\n".format(c.get_input_path(), err)
+                        print(" - Failed")
+                else:
+                    print("Skipped {}.".format(os.path.basename((c.get_input_path()))))
+                    text += "Skipped {}.".format(os.path.basename((c.get_input_path())))
             easygui.msgbox(text, "Export Complete")
             done = True
         else:
