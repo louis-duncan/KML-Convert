@@ -3,13 +3,12 @@ import os
 import subprocess
 import threading
 import time
-from threading import Thread
-
 import coord
 import traceback
 import easygui
 import re
 import html2text
+import urllib.request
 
 
 class UserCancelError(Exception):
@@ -130,6 +129,7 @@ class Converter:
     def __init__(self, input_path):
         self._input_path = input_path
         self._output_path = ""
+        self._icon_dir= ""
         self._data_lines = ""
         self._points = []
         self._errors = []
@@ -139,17 +139,21 @@ class Converter:
         self._converted = False
         self._converted_count = 0
 
-        self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>"]
+        self._placemark_expressions = ["<Placemark.*?>.*?</Placemark.*?>",
+                                       "<S_HAA.*?>.*?</S_HAA.*?>",
+                                       "<S_DECOY.*?>.*?</S_DECOY.*?>",
+                                       ]
 
-        self.decide_output_path()
+        self.decide_output_paths()
         self.load_data()
 
     def is_converted(self):
         return self._converted
 
-    def decide_output_path(self):
-        path, filename = os.path.split(self._input_path)
-        self._output_path = os.path.join(path, "output", str(filename.rsplit(".", 1)[0]) + ".csv")
+    def decide_output_paths(self):
+        path, file_name = os.path.split(self._input_path)
+        self._output_path = os.path.join(path, file_name.rsplit(".", 1)[0], str(file_name.rsplit(".", 1)[0]) + ".csv")
+        self._icon_dir = os.path.dirname(self._output_path)
 
     def load_data(self):
         self._data_lines, fn = load_data(self._input_path)
@@ -157,7 +161,7 @@ class Converter:
     def convert(self):
         self.decode_styles()
         self.process_lines(self._placemark_expressions)
-        self._has_icons = [self.get_style_icon(p.get_style()) for p in self.get_points()].count(None) == self.get_number_of_points()
+        self._has_icons = len(self._styles) + len(self._style_maps) > 0
         self._converted = True
 
     def get_points(self):
@@ -217,7 +221,47 @@ Fields:
         return text
 
     def export(self):
-        export_points(self._points, self._output_path)
+        # Ensure the dir exists.
+        self.make_all_icons_local()
+        path = os.path.dirname(self._output_path)
+        if not os.path.exists(path):
+            os.mkdir(path)
+
+        attribute_fields = get_fields([p.get_attributes() for p in self._points])
+
+        headings = ["x", "y", "id", "text"]
+
+        if self._has_icons:
+            headings.append("icon")
+
+        headings = headings + attribute_fields
+
+        rows = [headings]
+
+        output_dir = os.path.dirname(self._output_path)
+
+        for p in self._points:
+            values = [p.get_lon(),
+                      p.get_lat(),
+                      p.get_name(),
+                      p.get_text(),
+                      ]
+            if self._has_icons:
+                icon_path = self.get_style_icon(p.get_style())
+                if icon_path is not None:
+                    if icon_path.startswith("http"):
+                        pass
+                    else:
+                        icon_path = os.path.join(output_dir, icon_path)
+                    values.append(icon_path)
+            for a in attribute_fields:
+                values.append(p.get_attribute(a))
+            rows.append(values)
+
+        fh = open(self._output_path, "w", errors="surrogateescape")
+        writer = csv.writer(fh, lineterminator='\n')
+        writer.writerows(rows)
+        fh.close()
 
     def get_input_path(self):
         return self._input_path
@@ -229,7 +273,8 @@ Fields:
         formatted_fields = formatted_fields.strip()
         choices = ["View Points",
                    "View Errors",
-                   "Change Output\nLocation",
+                   "Change Export\nLocation",
+                   "Change Icon\nSource Directory"
                    "Back"]
         while True:
             text = """Input File:
@@ -259,6 +304,14 @@ Fields:
                 new_path = easygui.filesavebox("Choose Save Location", default=self._output_path, filetypes=["*.csv"])
                 if new_path is None:
                     pass
+                else:
+                    self._output_path = new_path
+            elif choice == choice[3]:
+                new_path = easygui.diropenbox("Choose Icon Location", default=self._icon_dir)
+                if new_path is None:
+                    pass
+                else:
+                    self._icon_dir = new_path
             else:
                 raise UserCancelError()
 
@@ -302,6 +355,22 @@ Fields:
         self._styles = [Style(st) for st in styles_ex.findall(self._data_lines)]
         self._style_maps = [StyleMap(mt) for mt in maps_ex.findall(self._data_lines)]
 
+    def make_all_icons_local(self):
+        s: Style
+        for s in self._styles:
+            path = s.get_icon_path()
+            if path.startswith("http"):
+                file_name = os.path.basename(path)
+                new_path = os.path.join(self._icon_dir,
+                                        file_name)
+                if os.path.exists(new_path):
+                    pass
+                else:
+                    if not os.path.exists(os.path.dirname(new_path)):
+                        os.mkdir(os.path.dirname(new_path))
+                    urllib.request.urlretrieve(path, new_path)
+                s.set_icon_path(new_path)
+
     def get_style_icon(self, style_id):
         if style_id is None:
             return None
@@ -312,10 +381,10 @@ Fields:
                 result = self.search_style_maps(style_id)
 
             if type(result) == Style:
-                return result.get_icon()
+                return result.get_icon_path()
             elif type(result) == StyleMap:
                 mapped_style = result.get_style()
-                return self.search_styles(mapped_style).get_icon()
+                return self.search_styles(mapped_style).get_icon_path()
             else:
                 return None
 
@@ -334,10 +403,6 @@ Fields:
                 result = s
                 break
         return result
-
-    def give_icons(self):
-        # Todo: Write
-        pass
 
     def process_lines(self, expressions=("<Placemark.*?>.*?</Placemark>",)):
         place_exes = [re.compile(e, re.DOTALL) for e in expressions]
@@ -389,7 +454,7 @@ class Style:
     def __init__(self, text=None):
         self._text = text
         self._id = ""
-        self._icon = None
+        self._icon_path = None
         self.decode()
 
     def decode(self):
@@ -401,17 +466,20 @@ class Style:
                                 '">',
                                 "#"]
                                )
-        self._icon = multi_strip(href_ex.findall(icon_ex.findall(self._text)[0])[0],
-                                 ["<href>",
+        self._icon_path = multi_strip(href_ex.findall(icon_ex.findall(self._text)[0])[0],
+                                      ["<href>",
                                   "</href>",
                                   ],
-                                 )
+                                      )
 
     def get_id(self):
         return self._id
 
-    def get_icon(self):
-        return self._icon
+    def get_icon_path(self):
+        return self._icon_path
+
+    def set_icon_path(self, new_path):
+        self._icon_path = new_path
 
     def check_id(self, test):
         return self._id == test
@@ -697,36 +765,6 @@ RETURNS: A list of values as dictated by the heading values. Non existent values
             row_values.append(point.get_attribute(field))
 
     return row_values
-
-
-def export_points(points, file_name="", fields=None):
-    """Takes a list of points and an option CSV file name.
-Writes the points data to the CSV file."""
-    if file_name == "":
-        file_name = easygui.filesavebox()
-    if file_name is None:
-        return None
-
-    # Ensure the dir exists.
-    path = os.path.dirname(file_name)
-    if not os.path.exists(path):
-        os.mkdir(path)
-
-    if fields is None:
-        fields = get_fields([p.get_attributes() for p in points])
-
-    headings = ["x", "y", "id", "text"]
-    if "icon" in fields:
-        headings.append("icon")
-        fields.remove("icon")
-    headings = headings + fields
-
-    rows = [headings] + [format_row(p, headings) for p in points]
-
-    fh = open(file_name, "w", errors="surrogateescape")
-    writer = csv.writer(fh, lineterminator='\n')
-    writer.writerows(rows)
-    fh.close()
 
 
 def single_file():
